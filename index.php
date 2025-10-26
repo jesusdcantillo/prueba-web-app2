@@ -1,38 +1,102 @@
 <?php
-// Configuración de la base de datos
+// Configuración de la base de datos MySQL
 $db_config = [
-    'host' => getenv('DB_HOST') ?: '10.0.0.4',
+    'host' => getenv('DB_HOST') ?: 'prueba2.mysql.database.azure.com',
     'port' => getenv('DB_PORT') ?: 3306,
-    'dbname' => getenv('DB_NAME') ?: 'prueba2',
+    'dbname' => 'prueba2', // Nombre fijo de la base de datos
     'user' => getenv('DB_USER') ?: 'usuario',
-    'password' => getenv('DB_PASSWORD') ?: 'contraseña1234567@'
+    'password' => getenv('DB_PASSWORD') ?: 'contraseña1234567@',
+    'ssl' => getenv('DB_SSL') ?: 'require'
 ];
 
-// Función para conectar a PostgreSQL
+// Función para conectar a MySQL
 function connectDB($config) {
-    $conn_string = "host={$config['host']} port={$config['port']} dbname={$config['dbname']} user={$config['user']} password={$config['password']} sslmode=require";
-    return pg_connect($conn_string);
+    $conn = mysqli_init();
+    
+    // Configurar SSL si es requerido
+    if ($config['ssl'] === 'require') {
+        mysqli_ssl_set($conn, NULL, NULL, NULL, NULL, NULL);
+    }
+    
+    $connected = mysqli_real_connect(
+        $conn,
+        $config['host'],
+        $config['user'],
+        $config['password'],
+        $config['dbname'],
+        $config['port']
+    );
+    
+    if (!$connected) {
+        return false;
+    }
+    
+    return $conn;
 }
 
 // Función para ejecutar consultas seguras
 function executeQuery($query, $params = []) {
     global $db_config;
     $conn = connectDB($db_config);
-    if (!$conn) return ['success' => false, 'error' => pg_last_error()];
+    if (!$conn) return ['success' => false, 'error' => mysqli_connect_error()];
     
-    $result = pg_query_params($conn, $query, $params);
-    if (!$result) {
-        $error = pg_last_error($conn);
-        pg_close($conn);
-        return ['success' => false, 'error' => $error];
+    // Preparar la consulta si hay parámetros
+    if (!empty($params)) {
+        $stmt = mysqli_prepare($conn, $query);
+        if (!$stmt) {
+            $error = mysqli_error($conn);
+            mysqli_close($conn);
+            return ['success' => false, 'error' => $error];
+        }
+        
+        // Bind parameters si existen
+        if (!empty($params)) {
+            $types = str_repeat('s', count($params));
+            mysqli_stmt_bind_param($stmt, $types, ...$params);
+        }
+        
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        
+        if (!$result && mysqli_errno($conn) !== 0) {
+            $error = mysqli_error($conn);
+            mysqli_stmt_close($stmt);
+            mysqli_close($conn);
+            return ['success' => false, 'error' => $error];
+        }
+        
+        $data = [];
+        if ($result) {
+            while ($row = mysqli_fetch_assoc($result)) {
+                $data[] = $row;
+            }
+            mysqli_free_result($result);
+        }
+        
+        mysqli_stmt_close($stmt);
+    } else {
+        // Consulta sin parámetros
+        $result = mysqli_query($conn, $query);
+        if (!$result) {
+            $error = mysqli_error($conn);
+            mysqli_close($conn);
+            return ['success' => false, 'error' => $error];
+        }
+        
+        $data = [];
+        if (is_bool($result)) {
+            // Para INSERT, UPDATE, DELETE, CREATE TABLE
+            $data = ['affected_rows' => mysqli_affected_rows($conn)];
+        } else {
+            // Para SELECT
+            while ($row = mysqli_fetch_assoc($result)) {
+                $data[] = $row;
+            }
+            mysqli_free_result($result);
+        }
     }
     
-    $data = [];
-    while ($row = pg_fetch_assoc($result)) {
-        $data[] = $row;
-    }
-    
-    pg_close($conn);
+    mysqli_close($conn);
     return ['success' => true, 'data' => $data, 'rowCount' => count($data)];
 }
 
@@ -79,17 +143,17 @@ function testConnection() {
     $conn = connectDB($db_config);
     
     if (!$conn) {
-        echo json_encode(['success' => false, 'error' => pg_last_error()]);
+        echo json_encode(['success' => false, 'error' => mysqli_connect_error()]);
         return;
     }
     
-    $result = pg_query($conn, "SELECT version(), current_database(), current_timestamp");
+    $result = mysqli_query($conn, "SELECT VERSION() as version, DATABASE() as current_database, NOW() as current_timestamp");
     if (!$result) {
-        echo json_encode(['success' => false, 'error' => pg_last_error($conn)]);
+        echo json_encode(['success' => false, 'error' => mysqli_error($conn)]);
         return;
     }
     
-    $row = pg_fetch_assoc($result);
+    $row = mysqli_fetch_assoc($result);
     echo json_encode([
         'success' => true,
         'host' => $db_config['host'],
@@ -98,15 +162,15 @@ function testConnection() {
         'timestamp' => $row['current_timestamp']
     ]);
     
-    pg_close($conn);
+    mysqli_close($conn);
 }
 
 function listTables() {
     $result = executeQuery(
-        "SELECT table_name 
-         FROM information_schema.tables 
-         WHERE table_schema = 'public' 
-         ORDER BY table_name"
+        "SELECT TABLE_NAME as table_name 
+         FROM INFORMATION_SCHEMA.TABLES 
+         WHERE TABLE_SCHEMA = 'prueba2' 
+         ORDER BY TABLE_NAME"
     );
     
     echo json_encode($result);
@@ -115,7 +179,7 @@ function listTables() {
 function createTable() {
     $result = executeQuery(
         "CREATE TABLE IF NOT EXISTS test_data (
-            id SERIAL PRIMARY KEY,
+            id INT AUTO_INCREMENT PRIMARY KEY,
             nombre VARCHAR(255) NOT NULL,
             descripcion TEXT,
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -135,7 +199,7 @@ function insertData() {
     }
     
     $result = executeQuery(
-        "INSERT INTO test_data (nombre, descripcion) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO test_data (nombre, descripcion) VALUES (?, ?)",
         [$nombre, $descripcion]
     );
     
@@ -167,7 +231,7 @@ function customQuery() {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web App PRD - Azure PHP</title>
+    <title>Web App PRD - Azure PHP MySQL</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -315,14 +379,14 @@ function customQuery() {
 </head>
 <body>
     <div class="container">
-        <h1>🚀 Web App PRD - Azure PHP</h1>
-        <p class="subtitle">Ejercicio 3: Conectividad con PostgreSQL desde DMZ</p>
+        <h1>🚀 Web App PRD - Azure PHP MySQL</h1>
+        <p class="subtitle">Conectividad con Azure MySQL Database</p>
         
         <div class="status-box">
             <h3>Estado de Conexión</h3>
             <p id="connection-status">Verificando conexión a base de datos...</p>
             <div class="arch-info">
-                <strong>Arquitectura:</strong> VNet DMZ → VNet Producción (Peering) | 
+                <strong>Arquitectura:</strong> App Service → Azure MySQL | 
                 <strong>DB Host:</strong> <?php echo $db_config['host']; ?>
             </div>
         </div>
@@ -345,7 +409,7 @@ function customQuery() {
                     <label for="descripcion">Descripción:</label>
                     <textarea id="descripcion" name="descripcion" required></textarea>
                 </div>
-                <button type="submit">💾 Guardar en PostgreSQL</button>
+                <button type="submit">💾 Guardar en MySQL</button>
             </form>
         </div>
 
@@ -378,13 +442,13 @@ function customQuery() {
             try {
                 const data = await apiCall('?action=test-connection');
                 if (data.success) {
-                    showResult('✅ Conexión exitosa a PostgreSQL<br>' + 
+                    showResult('✅ Conexión exitosa a MySQL<br>' + 
                                '<small>Host: ' + data.host + '<br>' +
                                'Versión: ' + data.version + '<br>' +
                                'Base de datos: ' + data.database + '</small>', 'success');
                     document.getElementById('connection-status').innerHTML = 
-                        '✅ <strong>Conectado</strong> - PostgreSQL ' + data.version.split(' ')[1] + 
-                        '<div class="arch-info"><strong>Arquitectura:</strong> VNet DMZ → VNet Producción (Peering)</div>';
+                        '✅ <strong>Conectado</strong> - MySQL ' + data.version + 
+                        '<div class="arch-info"><strong>Arquitectura:</strong> App Service → Azure MySQL</div>';
                 } else {
                     showResult('❌ Error de conexión: ' + data.error, 'error');
                     document.getElementById('connection-status').innerHTML = 
@@ -440,7 +504,7 @@ function customQuery() {
                 });
                 
                 if (data.success) {
-                    showResult('✅ Registro insertado correctamente<br>ID: ' + data.data[0].id, 'success');
+                    showResult('✅ Registro insertado correctamente', 'success');
                     document.getElementById('nombre').value = '';
                     document.getElementById('descripcion').value = '';
                 } else {
